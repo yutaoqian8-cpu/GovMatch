@@ -2,14 +2,33 @@ from __future__ import annotations
 
 import io
 import re
+from collections.abc import Iterable
+from copy import copy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import pandas as pd
 
+APP_VERSION = "3.0"
+RULESET_VERSION = "2026.1"
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_ROWS = 100_000
+MAX_COLUMNS = 200
+MAX_SHEETS = 30
 
-APP_VERSION = "2.0"
+RULE_SOURCES = [
+    {
+        "name": "教育部：中央机关及其直属机构2026年度考试录用公务员公告",
+        "url": "https://hudong.moe.gov.cn/s78/A04/tongzhi/202510/t20251015_1416829.html",
+        "note": "专业名称与代码应按当年度官方专业目录核验。",
+    },
+    {
+        "name": "国家税务总局：2026年度考试录用公务员相关事项通知",
+        "url": "https://www.chinatax.gov.cn/chinatax/n896543r/c5243601/content.html",
+        "note": "学历、学位与应届毕业生口径须以招录机关说明为准。",
+    },
+]
 
 COLUMN_ALIASES: dict[str, list[str]] = {
     "department": ["招录机关", "招考单位", "招录单位", "单位名称", "部门名称", "机关", "部门"],
@@ -78,29 +97,103 @@ EDU_RANK = {"大专": 1, "本科": 2, "硕士研究生": 3, "博士研究生": 4
 DEGREE_RANK = {"无学位": 0, "学士": 1, "硕士": 2, "博士": 3}
 
 UNLIMITED_WORDS = (
-    "不限", "无限制", "无要求", "不作要求", "不限制", "均可", "否", "无", "不限户籍",
+    "不限",
+    "无限制",
+    "无要求",
+    "不作要求",
+    "不限制",
+    "均可",
+    "否",
+    "无",
+    "不限户籍",
 )
 
 SERVICE_PROJECTS = [
-    "无", "大学生村官", "三支一扶", "西部计划", "特岗教师", "退役大学生士兵", "其他",
+    "无",
+    "大学生村官",
+    "三支一扶",
+    "西部计划",
+    "特岗教师",
+    "退役大学生士兵",
+    "其他",
 ]
 
 RISK_KEYWORDS = [
-    "户籍", "生源", "资格证", "职业资格", "英语", "四级", "六级", "法律职业资格",
-    "司法考试", "会计", "计算机等级", "普通话", "最低服务年限", "夜班", "值班",
-    "体能", "视力", "工作经历", "相关经历", "面向", "证书", "专业能力测试", "加试",
+    "户籍",
+    "生源",
+    "资格证",
+    "职业资格",
+    "英语",
+    "四级",
+    "六级",
+    "法律职业资格",
+    "司法考试",
+    "会计",
+    "计算机等级",
+    "普通话",
+    "最低服务年限",
+    "夜班",
+    "值班",
+    "体能",
+    "视力",
+    "工作经历",
+    "相关经历",
+    "面向",
+    "证书",
+    "专业能力测试",
+    "加试",
 ]
 
 PROVINCES = [
-    "北京", "天津", "上海", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江", "江苏",
-    "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东", "海南",
-    "四川", "贵州", "云南", "陕西", "甘肃", "青海", "台湾", "内蒙古", "广西", "西藏",
-    "宁夏", "新疆", "香港", "澳门",
+    "北京",
+    "天津",
+    "上海",
+    "重庆",
+    "河北",
+    "山西",
+    "辽宁",
+    "吉林",
+    "黑龙江",
+    "江苏",
+    "浙江",
+    "安徽",
+    "福建",
+    "江西",
+    "山东",
+    "河南",
+    "湖北",
+    "湖南",
+    "广东",
+    "海南",
+    "四川",
+    "贵州",
+    "云南",
+    "陕西",
+    "甘肃",
+    "青海",
+    "台湾",
+    "内蒙古",
+    "广西",
+    "西藏",
+    "宁夏",
+    "新疆",
+    "香港",
+    "澳门",
 ]
 
 CHINESE_NUMBERS = {
-    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
 }
 
 STATUS_LABELS = {
@@ -108,6 +201,19 @@ STATUS_LABELS = {
     "uncertain": "⚠️ 待核对",
     "fail": "❌ 不符合",
 }
+
+QUALIFICATION_ROLES = (
+    "education",
+    "degree",
+    "major",
+    "political",
+    "grassroots",
+    "service_project",
+    "fresh_graduate",
+    "gender",
+    "household",
+    "remarks",
+)
 
 
 @dataclass
@@ -121,6 +227,7 @@ class Profile:
     service_project: str
     fresh_graduate: bool
     gender: str
+    fresh_status: str = ""
     household: str = ""
     extra_conditions: list[str] = field(default_factory=list)
     strict_major: bool = False
@@ -146,19 +253,23 @@ class Profile:
             ("报考学历专业", self.primary_major_text or "未填写"),
         ]
         if self.prior_education:
-            rows.extend([
-                ("补充学历", self.prior_education),
-                ("补充学历专业", self.prior_major_text or "未填写"),
-            ])
-        rows.extend([
-            ("政治面貌", self.political),
-            ("基层工作经历", f"{self.grassroots_years}年"),
-            ("服务基层项目", self.service_project),
-            ("应届身份", "是" if self.fresh_graduate else "否"),
-            ("性别", self.gender),
-            ("户籍/生源", self.household or "未填写"),
-            ("其他条件", "、".join(self.extra_conditions) or "未填写"),
-        ])
+            rows.extend(
+                [
+                    ("补充学历", self.prior_education),
+                    ("补充学历专业", self.prior_major_text or "未填写"),
+                ]
+            )
+        rows.extend(
+            [
+                ("政治面貌", self.political),
+                ("基层工作经历", f"{self.grassroots_years}年"),
+                ("服务基层项目", self.service_project),
+                ("应届身份", self.fresh_status or ("是" if self.fresh_graduate else "否")),
+                ("性别", self.gender),
+                ("户籍/生源", self.household or "未填写"),
+                ("其他条件", "、".join(self.extra_conditions) or "未填写"),
+            ]
+        )
         return rows
 
 
@@ -175,6 +286,10 @@ class MatchResult:
     score: int
     qualification_label: str
     checks: list[Check]
+    coverage_score: int = 0
+    checked_fields: int = 0
+    expected_fields: int = len(QUALIFICATION_ROLES)
+    missing_fields: list[str] = field(default_factory=list)
 
 
 def text(value: Any) -> str:
@@ -197,7 +312,9 @@ def is_unlimited(value: Any) -> bool:
         return True
     normalized = compact(value_text)
     exact_unlimited = {compact(word) for word in UNLIMITED_WORDS}
-    return normalized in exact_unlimited or any(phrase in value_text for phrase in ("专业不限", "不限专业", "户籍不限"))
+    return normalized in exact_unlimited or any(
+        phrase in value_text for phrase in ("专业不限", "不限专业", "户籍不限")
+    )
 
 
 def normalize_column_name(value: Any) -> str:
@@ -222,7 +339,11 @@ def aliases_for_template(template: str) -> dict[str, list[str]]:
     return merged
 
 
-def detect_header_row(raw: pd.DataFrame, template: str = "自动识别（通用）", max_rows: int = 30) -> int:
+def detect_header_row_with_score(
+    raw: pd.DataFrame,
+    template: str = "自动识别（通用）",
+    max_rows: int = 30,
+) -> tuple[int, int]:
     aliases = aliases_for_template(template)
     keywords = {normalize_column_name(alias) for values in aliases.values() for alias in values}
     best_row, best_score = 0, -1
@@ -238,10 +359,29 @@ def detect_header_row(raw: pd.DataFrame, template: str = "自动识别（通用�
                 score += 1
         if score > best_score:
             best_row, best_score = idx, score
-    return best_row
+    return best_row, best_score
+
+
+def detect_header_row(raw: pd.DataFrame, template: str = "自动识别（通用）", max_rows: int = 30) -> int:
+    return detect_header_row_with_score(raw, template, max_rows)[0]
+
+
+def _validate_upload_size(file_bytes: bytes) -> None:
+    if not file_bytes:
+        raise ValueError("文件为空，请重新选择岗位表。")
+    if len(file_bytes) > MAX_FILE_BYTES:
+        raise ValueError(f"文件超过 {MAX_FILE_BYTES // 1024 // 1024} MB 上限，请先精简岗位表。")
+
+
+def _validate_dataframe_size(df: pd.DataFrame) -> None:
+    if len(df) > MAX_ROWS:
+        raise ValueError(f"岗位表超过 {MAX_ROWS:,} 行上限，请先按地区或职位拆分。")
+    if len(df.columns) > MAX_COLUMNS:
+        raise ValueError(f"岗位表超过 {MAX_COLUMNS} 列上限，请删除无关列后重试。")
 
 
 def read_csv_flexible(file_bytes: bytes) -> pd.DataFrame:
+    _validate_upload_size(file_bytes)
     last_error: Exception | None = None
     for encoding in ("utf-8-sig", "gb18030", "gbk", "utf-8"):
         try:
@@ -254,7 +394,11 @@ def read_csv_flexible(file_bytes: bytes) -> pd.DataFrame:
 def list_excel_sheets(file_bytes: bytes, filename: str) -> list[str]:
     if not filename.lower().endswith((".xlsx", ".xls")):
         return []
-    return pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+    _validate_upload_size(file_bytes)
+    names = pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+    if len(names) > MAX_SHEETS:
+        raise ValueError(f"工作表数量超过 {MAX_SHEETS} 个上限，请先精简文件。")
+    return names
 
 
 def load_tabular_file(
@@ -263,13 +407,16 @@ def load_tabular_file(
     sheet_name: str | int | None = 0,
     template: str = "自动识别（通用）",
 ) -> pd.DataFrame:
+    _validate_upload_size(file_bytes)
     suffix = filename.lower().rsplit(".", 1)[-1]
     if suffix == "csv":
         df = read_csv_flexible(file_bytes)
     elif suffix in {"xlsx", "xls"}:
         buffer = io.BytesIO(file_bytes)
         raw = pd.read_excel(buffer, sheet_name=sheet_name, header=None, dtype=object)
-        header_row = detect_header_row(raw, template=template)
+        header_row, confidence = detect_header_row_with_score(raw, template=template)
+        if confidence < 4:
+            raise ValueError("未能可靠识别表头；请将列名放在前30行，并至少包含职位、专业或学历字段。")
         buffer.seek(0)
         df = pd.read_excel(buffer, sheet_name=sheet_name, header=header_row, dtype=object)
     else:
@@ -277,6 +424,7 @@ def load_tabular_file(
 
     df = df.dropna(axis=0, how="all").dropna(axis=1, how="all").copy()
     df.columns = deduplicate_columns(df.columns)
+    _validate_dataframe_size(df)
     return df.reset_index(drop=True)
 
 
@@ -293,13 +441,22 @@ def auto_map_columns(columns: Iterable[str], template: str = "自动识别（通
             continue
         fuzzy = next(
             (
-                column for column, norm in normalized.items()
+                column
+                for column, norm in normalized.items()
                 if any(alias and (alias in norm or norm in alias) for alias in alias_norms)
             ),
             None,
         )
         mapping[role] = fuzzy
     return mapping
+
+
+def mapping_conflicts(mapping: dict[str, str | None]) -> dict[str, list[str]]:
+    by_column: dict[str, list[str]] = {}
+    for role, column in mapping.items():
+        if column:
+            by_column.setdefault(column, []).append(role)
+    return {column: roles for column, roles in by_column.items() if len(roles) > 1}
 
 
 def extract_years(requirement: Any) -> int | None:
@@ -319,12 +476,17 @@ def check_education(requirement: Any, user_value: str) -> Check:
     req = text(requirement)
     if is_unlimited(req):
         return Check("学历", "pass", "学历不限")
+    if user_value not in EDU_RANK:
+        return Check("学历", "uncertain", "尚未填写有效学历")
     user_rank = EDU_RANK[user_value]
 
     min_patterns = [
-        ("大专及以上", 1), ("专科及以上", 1),
-        ("本科及以上", 2), ("大学本科及以上", 2),
-        ("硕士研究生及以上", 3), ("研究生及以上", 3),
+        ("大专及以上", 1),
+        ("专科及以上", 1),
+        ("本科及以上", 2),
+        ("大学本科及以上", 2),
+        ("硕士研究生及以上", 3),
+        ("研究生及以上", 3),
         ("博士研究生及以上", 4),
     ]
     for pattern, min_rank in min_patterns:
@@ -354,6 +516,8 @@ def check_degree(requirement: Any, user_value: str) -> Check:
     req = text(requirement)
     if is_unlimited(req):
         return Check("学位", "pass", "学位不限")
+    if user_value not in DEGREE_RANK:
+        return Check("学位", "uncertain", "尚未填写有效学位")
     user_rank = DEGREE_RANK[user_value]
 
     if "与最高学历相对应" in req or "相应学位" in req:
@@ -370,8 +534,38 @@ def check_degree(requirement: Any, user_value: str) -> Check:
     return Check("学位", "fail", f"要求“{req}”，用户为{user_value}")
 
 
+def _negative_major_match(requirement: str, candidates: list[str]) -> str | None:
+    """Find candidates explicitly excluded by phrases such as `不含法学` or `非法学类`."""
+    req = compact(requirement)
+    for candidate in candidates:
+        normalized = compact(candidate)
+        if not normalized:
+            continue
+        stems = {normalized, re.sub(r"(专业|学类|类|学)$", "", normalized)}
+        for stem in sorted((item for item in stems if len(item) >= 2), key=len, reverse=True):
+            patterns = (
+                rf"非{re.escape(stem)}(?:专业|学类|类)?",
+                rf"不含[^，；、]{{0,12}}{re.escape(stem)}",
+                rf"不包括[^，；、]{{0,12}}{re.escape(stem)}",
+                rf"排除[^，；、]{{0,12}}{re.escape(stem)}",
+                rf"{re.escape(stem)}(?:专业|学类|类)?除外",
+                rf"除[^，；、]{{0,12}}{re.escape(stem)}[^，；、]{{0,8}}外",
+            )
+            if any(re.search(pattern, req) for pattern in patterns):
+                return candidate
+    return None
+
+
+def _positive_major_text(requirement: str) -> str:
+    segments = re.split(r"[，；;。\n]", requirement)
+    negative_markers = ("不含", "不包括", "排除", "除外")
+    kept = [segment for segment in segments if not any(marker in segment for marker in negative_markers)]
+    value = "，".join(kept)
+    return re.sub(r"非([\u4e00-\u9fffA-Za-z0-9]+?)(?:专业|学类|类)(?=$|[、，；或和及])", "", value)
+
+
 def _candidate_match(requirement: str, candidates: list[str]) -> str | None:
-    req_compact = compact(requirement)
+    req_compact = compact(_positive_major_text(requirement))
     for candidate in candidates:
         normalized = compact(candidate)
         if normalized and normalized in req_compact:
@@ -387,6 +581,10 @@ def check_major(requirement: Any, profile: Profile) -> Check:
     primary = [*profile.majors, *profile.major_categories]
     prior = [*profile.prior_majors, *profile.prior_major_categories]
 
+    excluded = _negative_major_match(req, [*primary, *prior])
+    if excluded:
+        return Check("专业", "fail", f"岗位条件明确排除了“{excluded}”")
+
     matched = _candidate_match(req, primary)
     if matched:
         return Check("专业", "pass", f"拟报考学历专业直接匹配：{matched}")
@@ -395,7 +593,8 @@ def check_major(requirement: Any, profile: Profile) -> Check:
     if prior_matched:
         level = profile.prior_education or "补充学历"
         return Check(
-            "专业", "uncertain",
+            "专业",
+            "uncertain",
             f"{level}专业“{prior_matched}”匹配，但拟以{profile.education}报考，需确认能否按该学历专业认定",
         )
 
@@ -461,14 +660,44 @@ def check_service_project(requirement: Any, user_value: str) -> Check:
     return Check("服务基层项目", "uncertain", f"用户经历为{user_value}，岗位要求“{req}”")
 
 
-def check_fresh_graduate(requirement: Any, is_fresh: bool) -> Check:
+def check_fresh_graduate(requirement: Any, is_fresh: bool, fresh_status: str = "") -> Check:
     req = text(requirement)
-    if is_unlimited(req):
+    unlimited_phrases = (
+        "不限应届",
+        "应届不限",
+        "不限制应届",
+        "不限身份",
+        "身份不限",
+        "不限人员身份",
+    )
+    if is_unlimited(req) or any(phrase in req for phrase in unlimited_phrases):
         return Check("应届身份", "pass", "未限制应届身份")
+
+    status = fresh_status.strip()
+    if "不确定" in status or "请选择" in status:
+        return Check("应届身份", "uncertain", f"岗位要求“{req}”，个人应届身份尚未确认")
+
+    year_match = re.search(r"(20\d{2})届", req)
+    if year_match:
+        target = year_match.group(1)
+        if target in status:
+            return Check("应届身份", "pass", f"个人身份与岗位要求的{target}届一致")
+        if status:
+            return Check("应届身份", "fail", f"岗位限{target}届，个人选择为“{status}”")
+        return Check("应届身份", "uncertain", f"岗位限{target}届，需核对毕业年份")
+
     if any(keyword in req for keyword in ["应届", "高校毕业生", "当年毕业生"]):
-        return Check("应届身份", "pass" if is_fresh else "fail", "用户选择了应届身份" if is_fresh else f"岗位要求“{req}”")
+        return Check(
+            "应届身份",
+            "pass" if is_fresh else "fail",
+            "用户选择了应届身份" if is_fresh else f"岗位要求“{req}”",
+        )
     if any(keyword in req for keyword in ["社会人员", "非应届"]):
-        return Check("应届身份", "pass" if not is_fresh else "uncertain", "符合社会人员/非应届要求" if not is_fresh else f"岗位面向“{req}”，需确认应届生是否可报")
+        return Check(
+            "应届身份",
+            "pass" if not is_fresh else "uncertain",
+            "符合社会人员/非应届要求" if not is_fresh else f"岗位面向“{req}”，需确认应届生是否可报",
+        )
     return Check("应届身份", "uncertain", f"无法自动解析“{req}”")
 
 
@@ -480,10 +709,28 @@ def check_gender(requirement: Any, user_value: str) -> Check:
     male_only = "男性" in req or normalized in {"男", "限男"}
     female_only = "女性" in req or normalized in {"女", "限女"}
     if male_only:
-        return Check("性别", "pass" if user_value == "男" else "fail", "性别符合要求" if user_value == "男" else "岗位限男性")
+        return Check(
+            "性别",
+            "pass" if user_value == "男" else "fail",
+            "性别符合要求" if user_value == "男" else "岗位限男性",
+        )
     if female_only:
-        return Check("性别", "pass" if user_value == "女" else "fail", "性别符合要求" if user_value == "女" else "岗位限女性")
+        return Check(
+            "性别",
+            "pass" if user_value == "女" else "fail",
+            "性别符合要求" if user_value == "女" else "岗位限女性",
+        )
     return Check("性别", "uncertain", f"无法自动解析“{req}”")
+
+
+def _administrative_places(value: str) -> tuple[set[str], set[str]]:
+    provinces = {province for province in PROVINCES if province in value}
+    cities = {
+        match.group(1)
+        for match in re.finditer(r"([\u4e00-\u9fff]{2,12}?(?:市|自治州|地区|盟))", value)
+        if match.group(1) not in {"户籍所在地", "生源所在地"}
+    }
+    return provinces, cities
 
 
 def check_household(requirement: Any, user_value: str) -> Check:
@@ -497,9 +744,32 @@ def check_household(requirement: Any, user_value: str) -> Check:
     if user_compact in req_compact or req_compact in user_compact:
         return Check("户籍/生源", "pass", f"用户填写的“{user_value}”与岗位要求直接匹配")
 
-    matched_provinces = [province for province in PROVINCES if province in req and province in user_value]
-    if matched_provinces:
-        return Check("户籍/生源", "pass", f"省级范围匹配：{matched_provinces[0]}")
+    req_provinces, req_cities = _administrative_places(req)
+    user_provinces, user_cities = _administrative_places(user_value)
+    province_matches = req_provinces & user_provinces
+    city_matches = req_cities & user_cities
+
+    if req_cities:
+        if city_matches:
+            return Check("户籍/生源", "pass", f"地市范围匹配：{sorted(city_matches)[0]}")
+        if user_cities and province_matches:
+            return Check(
+                "户籍/生源",
+                "fail",
+                f"岗位限制到{'、'.join(sorted(req_cities))}，个人填写为{'、'.join(sorted(user_cities))}",
+            )
+        return Check(
+            "户籍/生源", "uncertain", f"岗位限制到地市“{'、'.join(sorted(req_cities))}”，需补充或核对具体地市"
+        )
+
+    if province_matches:
+        return Check("户籍/生源", "pass", f"省级范围匹配：{sorted(province_matches)[0]}")
+    if req_provinces and user_provinces:
+        return Check(
+            "户籍/生源",
+            "fail",
+            f"岗位要求{'、'.join(sorted(req_provinces))}，个人为{'、'.join(sorted(user_provinces))}",
+        )
     return Check("户籍/生源", "uncertain", f"用户为“{user_value}”，岗位要求“{req}”，需核对具体口径")
 
 
@@ -544,9 +814,17 @@ def evaluate_job(row: pd.Series, mapping: dict[str, str | None], profile: Profil
     if mapping.get("grassroots"):
         checks.append(check_grassroots(value_from_row(row, mapping, "grassroots"), profile.grassroots_years))
     if mapping.get("service_project"):
-        checks.append(check_service_project(value_from_row(row, mapping, "service_project"), profile.service_project))
+        checks.append(
+            check_service_project(value_from_row(row, mapping, "service_project"), profile.service_project)
+        )
     if mapping.get("fresh_graduate"):
-        checks.append(check_fresh_graduate(value_from_row(row, mapping, "fresh_graduate"), profile.fresh_graduate))
+        checks.append(
+            check_fresh_graduate(
+                value_from_row(row, mapping, "fresh_graduate"),
+                profile.fresh_graduate,
+                profile.fresh_status,
+            )
+        )
     if mapping.get("gender"):
         checks.append(check_gender(value_from_row(row, mapping, "gender"), profile.gender))
     if mapping.get("household"):
@@ -554,24 +832,41 @@ def evaluate_job(row: pd.Series, mapping: dict[str, str | None], profile: Profil
     if mapping.get("remarks"):
         checks.append(check_remarks(value_from_row(row, mapping, "remarks"), profile.extra_conditions))
 
+    missing_roles = [role for role in QUALIFICATION_ROLES if not mapping.get(role)]
+    checks.extend(
+        Check(FIELD_LABELS[role], "uncertain", "岗位表未识别到该资格字段，系统不能视为不限")
+        for role in missing_roles
+    )
+
     fail_count = sum(check.status == "fail" for check in checks)
     uncertain_count = sum(check.status == "uncertain" for check in checks)
     pass_count = sum(check.status == "pass" for check in checks)
+
+    checked_fields = len(QUALIFICATION_ROLES) - len(missing_roles)
+    coverage_score = round(100 * checked_fields / len(QUALIFICATION_ROLES))
 
     if fail_count:
         overall = "明确不符合"
         score = 0
         label = "不建议报考"
     else:
-        score = max(1, min(100, round(100 * pass_count / max(len(checks), 1) - uncertain_count * 2)))
+        score = max(0, min(100, round(100 * pass_count / max(len(checks), 1))))
         if uncertain_count == 0:
-            overall, label = "资格初筛匹配", "资格高度匹配"
-        elif uncertain_count <= 2:
-            overall, label = "存在待核对项", "资格基本匹配"
+            overall, label = "资格初筛匹配", "已核验条件通过"
+        elif uncertain_count <= 2 and coverage_score >= 80:
+            overall, label = "存在待核对项", "少量条件待核对"
         else:
-            overall, label = "存在待核对项", "谨慎人工核对"
+            overall, label = "存在待核对项", "需要人工核对"
 
-    return MatchResult(overall=overall, score=score, qualification_label=label, checks=checks)
+    return MatchResult(
+        overall=overall,
+        score=score,
+        qualification_label=label,
+        checks=checks,
+        coverage_score=coverage_score,
+        checked_fields=checked_fields,
+        missing_fields=[FIELD_LABELS[role] for role in missing_roles],
+    )
 
 
 def evaluate_dataframe(
@@ -582,6 +877,7 @@ def evaluate_dataframe(
     output = df.copy()
     overall_values: list[str] = []
     score_values: list[int] = []
+    coverage_values: list[int] = []
     label_values: list[str] = []
     pending_values: list[int] = []
     fail_values: list[int] = []
@@ -592,26 +888,34 @@ def evaluate_dataframe(
         result = evaluate_job(row, mapping, profile)
         overall_values.append(result.overall)
         score_values.append(result.score)
+        coverage_values.append(result.coverage_score)
         label_values.append(result.qualification_label)
         pending_values.append(sum(check.status == "uncertain" for check in result.checks))
         fail_values.append(sum(check.status == "fail" for check in result.checks))
-        reason_values.append("；".join(f"{check.field}[{STATUS_LABELS[check.status]}]：{check.reason}" for check in result.checks))
+        reason_values.append(
+            "；".join(
+                f"{check.field}[{STATUS_LABELS[check.status]}]：{check.reason}" for check in result.checks
+            )
+        )
         details[index] = result.checks
 
     output.insert(0, "资格结论", overall_values)
-    output.insert(1, "资格匹配度", score_values)
-    output.insert(2, "资格标签", label_values)
-    output.insert(3, "待核对项数", pending_values)
-    output.insert(4, "不符合项数", fail_values)
-    output.insert(5, "匹配说明", reason_values)
+    output.insert(1, "规则通过度", score_values)
+    output.insert(2, "规则覆盖率", coverage_values)
+    output.insert(3, "资格标签", label_values)
+    output.insert(4, "待核对项数", pending_values)
+    output.insert(5, "不符合项数", fail_values)
+    output.insert(6, "匹配说明", reason_values)
     return output, details
 
 
 def readable_checks(checks: list[Check]) -> pd.DataFrame:
-    return pd.DataFrame([
-        {"检查项": check.field, "结果": STATUS_LABELS[check.status], "说明": check.reason}
-        for check in checks
-    ])
+    return pd.DataFrame(
+        [
+            {"检查项": check.field, "结果": STATUS_LABELS[check.status], "说明": check.reason}
+            for check in checks
+        ]
+    )
 
 
 def pending_summary(checks: list[Check], limit: int = 3) -> str:
@@ -650,7 +954,9 @@ def generate_consultation_script(
     failed = [check for check in checks if check.status == "fail"]
     questions = uncertain or failed
     if questions:
-        numbered = "\n".join(f"{idx}. {check.field}：{check.reason}" for idx, check in enumerate(questions, 1))
+        numbered = "\n".join(
+            f"{idx}. {check.field}：{check.reason}" for idx, check in enumerate(questions, 1)
+        )
     else:
         numbered = "1. 请问资格复审时还需要特别准备哪些证明材料？"
 
@@ -667,19 +973,43 @@ def generate_consultation_script(
     )
 
 
+def sanitize_excel_value(value: Any) -> Any:
+    """Neutralize spreadsheet formulas originating from uploaded cells."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def sanitize_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    return df.map(sanitize_excel_value)
+
+
 def dataframe_to_excel_bytes(df: pd.DataFrame, profile: Profile) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="岗位匹配结果")
-        pd.DataFrame(profile.to_rows(), columns=["个人条件", "填写内容"]).to_excel(
-            writer, index=False, sheet_name="个人条件"
-        )
+        sanitize_dataframe_for_excel(df).to_excel(writer, index=False, sheet_name="岗位匹配结果")
+        sanitize_dataframe_for_excel(
+            pd.DataFrame(profile.to_rows(), columns=["个人条件", "填写内容"])
+        ).to_excel(writer, index=False, sheet_name="个人条件")
+        pd.DataFrame(
+            [
+                {
+                    "规则集版本": RULESET_VERSION,
+                    "参考来源": source["name"],
+                    "网址": source["url"],
+                    "说明": source["note"],
+                }
+                for source in RULE_SOURCES
+            ]
+        ).to_excel(writer, index=False, sheet_name="规则与来源")
 
         result_ws = writer.book["岗位匹配结果"]
         result_ws.freeze_panes = "A2"
         result_ws.auto_filter.ref = result_ws.dimensions
         for cell in result_ws[1]:
-            cell.font = cell.font.copy(bold=True)
+            font = copy(cell.font)
+            font.bold = True
+            cell.font = font
         for column, width in {"A": 16, "B": 13, "C": 16, "D": 12, "E": 12, "F": 60}.items():
             result_ws.column_dimensions[column].width = width
 
@@ -688,7 +1018,20 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, profile: Profile) -> bytes:
         profile_ws.column_dimensions["A"].width = 22
         profile_ws.column_dimensions["B"].width = 60
         for cell in profile_ws[1]:
-            cell.font = cell.font.copy(bold=True)
+            font = copy(cell.font)
+            font.bold = True
+            cell.font = font
+
+        source_ws = writer.book["规则与来源"]
+        source_ws.freeze_panes = "A2"
+        source_ws.column_dimensions["A"].width = 16
+        source_ws.column_dimensions["B"].width = 54
+        source_ws.column_dimensions["C"].width = 70
+        source_ws.column_dimensions["D"].width = 60
+        for cell in source_ws[1]:
+            font = copy(cell.font)
+            font.bold = True
+            cell.font = font
     return buffer.getvalue()
 
 
